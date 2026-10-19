@@ -32,6 +32,9 @@ selectors:
   workers:
     strategy: spillover
     targets: [a, b]
+  failover:
+    strategy: fallback
+    targets: [a, b]
 `))
 	require.NoError(t, err)
 
@@ -46,6 +49,16 @@ selectors:
 
 	workers := cfg.Selectors["workers"]
 	assert.Equal(t, 1, workers.Settings.Spillover)
+
+	failover := cfg.Selectors["failover"]
+	assert.Equal(t, SelectorStrategyFallback, failover.Strategy)
+	assert.Equal(t, []string{"a", "b"}, failover.Targets)
+	assert.Empty(t, failover.Settings.Fallback.Group)
+
+	groupID, members, err := cfg.FallbackGroup(failover)
+	require.NoError(t, err)
+	assert.Equal(t, "balanced", groupID)
+	assert.Equal(t, []string{"a", "b"}, members)
 }
 
 func TestConfig_Selectors_Validation(t *testing.T) {
@@ -188,6 +201,29 @@ selectors:
 			wantErr: `duplicate resolved model "remote/remote-model"`,
 		},
 		{
+			name: "fallback without a fallback target",
+			config: `
+selectors:
+  public:
+    strategy: fallback
+    targets: [a]
+`,
+			wantErr: "must contain a primary target and at least one fallback target",
+		},
+		{
+			name: "fallback unknown group",
+			config: `
+selectors:
+  public:
+    strategy: fallback
+    targets: [a, b]
+    settings:
+      fallback:
+        group: missing
+`,
+			wantErr: `settings.fallback.group "missing" is not a routing group`,
+		},
+		{
 			name: "spillover swapping group",
 			config: `
 selectors:
@@ -223,6 +259,63 @@ peers:
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+func TestConfig_Selectors_FallbackGroupExplicit(t *testing.T) {
+	cfg, err := LoadConfigFromReader(strings.NewReader(`
+models:
+  a:
+    cmd: echo ${PORT}
+  b:
+    cmd: echo ${PORT}
+  c:
+    cmd: echo ${PORT}
+groups:
+  primary:
+    swap: true
+    exclusive: true
+    members: [a]
+  spill:
+    swap: false
+    exclusive: false
+    members: [b, c]
+selectors:
+  failover:
+    strategy: fallback
+    targets: [a, b]
+    settings:
+      fallback:
+        group: spill
+`))
+	require.NoError(t, err)
+
+	groupID, members, err := cfg.FallbackGroup(cfg.Selectors["failover"])
+	require.NoError(t, err)
+	assert.Equal(t, "spill", groupID)
+	assert.Equal(t, []string{"b", "c"}, members)
+}
+
+func TestConfig_Selectors_FallbackRejectsMatrixRouter(t *testing.T) {
+	_, err := LoadConfigFromReader(strings.NewReader(`
+models:
+  a:
+    cmd: echo ${PORT}
+  b:
+    cmd: echo ${PORT}
+routing:
+  router:
+    use: matrix
+    settings:
+      matrix:
+        sets:
+          standard: "a & b"
+selectors:
+  failover:
+    strategy: fallback
+    targets: [a, b]
+`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires the group router")
 }
 
 func TestConfig_Selectors_PeerModelFQN(t *testing.T) {

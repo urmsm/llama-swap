@@ -66,7 +66,7 @@ selectors:
     description: "Best currently loaded coding model"
 ```
 
-Three strategies:
+Four strategies:
 
 **`warm`** — use the first target that is already ready; failing that, one that
 is already starting; failing that, cold-start the first. This is the one you
@@ -86,6 +86,50 @@ selectors:
     settings:
       spillover: 4     # requests per active target before spilling over
 ```
+
+**`fallback`** — serve the primary (first) target while a routing group is
+idle, and switch to the first usable fallback target while another member of
+that group is running. Use it for a fast accelerator model that cannot coexist
+with the group's large models:
+
+```yaml
+routing:
+  router:
+    use: group
+    settings:
+      groups:
+        main:
+          swap: true
+          exclusive: true
+          members: [llama-70b, translator-gpu]
+        aux:
+          swap: false
+          exclusive: false
+          persistent: true
+          members: [translator-cpu]
+
+selectors:
+  translator:
+    strategy: fallback
+    targets: [translator-gpu, translator-cpu]
+```
+
+With that configuration a request for `translator` uses `translator-gpu` while
+nothing else in `main` is running, and `translator-cpu` while a `main` model
+such as `llama-70b` is starting or ready. Loading the fallback never evicts the
+running model.
+
+Rules that differ from `warm`:
+
+- The decision reads the **routing group**, not the loaded targets. A fallback
+  that a TTL just unloaded does not send the next request back to the primary
+  target, so a busy group keeps using its fallback.
+- `settings.fallback.group` names the group to watch. When it is empty the
+  group that contains the primary target is used.
+- At least two targets are required, and the strategy needs the group router:
+  the matrix router has no groups.
+- Members that are stopping, and the primary target itself, do not make the
+  group busy.
 
 Rules worth knowing:
 
@@ -108,5 +152,5 @@ you get "when I'm coding, use whichever coding model is already hot".
 
 ## Related
 
-- `reference/config/profiles` and `reference/config/selectors`
+- `reference/config/selectors`
 - `guides/routing/groups-and-matrix` — which models can be loaded at the same time

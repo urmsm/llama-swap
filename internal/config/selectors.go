@@ -11,11 +11,26 @@ const (
 	SelectorStrategyWarm      = "warm"
 	SelectorStrategyPin       = "pin"
 	SelectorStrategySpillover = "spillover"
+	SelectorStrategyFallback  = "fallback"
 )
+
+// selectorStrategyList is the human readable list of valid strategies used in
+// validation errors.
+const selectorStrategyList = "warm, pin, spillover, fallback"
+
+// FallbackSettings configures the fallback strategy.
+type FallbackSettings struct {
+	// Group names the routing group that is watched for occupancy. While
+	// another member of that group is starting or ready, the selector skips the
+	// primary target and serves the request from the first usable fallback
+	// target. Leave it empty to use the group that contains the primary target.
+	Group string `yaml:"group" json:"group"`
+}
 
 // SelectorSettings contains strategy-specific selector settings.
 type SelectorSettings struct {
-	Spillover int `yaml:"spillover" json:"spillover"`
+	Spillover int              `yaml:"spillover" json:"spillover"`
+	Fallback  FallbackSettings `yaml:"fallback" json:"fallback"`
 }
 
 // SelectorConfig describes a virtual model ID that resolves to a concrete
@@ -59,11 +74,11 @@ func validateSelectors(config Config) error {
 		}
 
 		switch selector.Strategy {
-		case SelectorStrategyPin, SelectorStrategyWarm, SelectorStrategySpillover:
+		case SelectorStrategyPin, SelectorStrategyWarm, SelectorStrategySpillover, SelectorStrategyFallback:
 		case "":
 			return fmt.Errorf("selectors.%s.strategy is required", selectorID)
 		default:
-			return fmt.Errorf("selectors.%s.strategy: unknown strategy %q (valid: warm, pin, spillover)", selectorID, selector.Strategy)
+			return fmt.Errorf("selectors.%s.strategy: unknown strategy %q (valid: %s)", selectorID, selector.Strategy, selectorStrategyList)
 		}
 		if len(selector.Targets) == 0 {
 			return fmt.Errorf("selectors.%s.targets must contain at least one entry", selectorID)
@@ -96,6 +111,13 @@ func validateSelectors(config Config) error {
 			}
 		}
 
+		if selector.Strategy == SelectorStrategyFallback {
+			if err := validateFallbackSelector(config, selectorID, selector); err != nil {
+				return err
+			}
+			continue
+		}
+
 		if selector.Strategy != SelectorStrategySpillover {
 			continue
 		}
@@ -113,6 +135,57 @@ func validateSelectors(config Config) error {
 		if err := validateSpilloverCoexistence(config, selectorID, localTargets); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// FallbackGroup resolves the routing group that a fallback selector watches and
+// returns its ID together with its member model IDs. An empty
+// settings.fallback.group resolves to the group that contains the primary
+// target.
+func (config Config) FallbackGroup(selector SelectorConfig) (string, []string, error) {
+	if config.Routing.Router.Use == "matrix" {
+		return "", nil, fmt.Errorf("strategy %q requires the group router, the matrix router has no groups", SelectorStrategyFallback)
+	}
+
+	groupID := strings.TrimSpace(selector.Settings.Fallback.Group)
+	if groupID == "" {
+		if len(selector.Targets) == 0 {
+			return "", nil, fmt.Errorf("strategy %q requires at least one target", SelectorStrategyFallback)
+		}
+		primary, local := config.RealModelName(selector.Targets[0])
+		if !local {
+			return "", nil, fmt.Errorf("strategy %q needs settings.fallback.group when the primary target %q is not a local model", SelectorStrategyFallback, selector.Targets[0])
+		}
+		for id, group := range config.Routing.Router.Settings.Groups {
+			for _, member := range group.Members {
+				if member == primary {
+					groupID = id
+					break
+				}
+			}
+			if groupID != "" {
+				break
+			}
+		}
+		if groupID == "" {
+			return "", nil, fmt.Errorf("strategy %q: primary target %q is not in a routing group, set settings.fallback.group", SelectorStrategyFallback, selector.Targets[0])
+		}
+	}
+
+	group, found := config.Routing.Router.Settings.Groups[groupID]
+	if !found {
+		return "", nil, fmt.Errorf("settings.fallback.group %q is not a routing group", groupID)
+	}
+	return groupID, group.Members, nil
+}
+
+func validateFallbackSelector(config Config, selectorID string, selector SelectorConfig) error {
+	if len(selector.Targets) < 2 {
+		return fmt.Errorf("selectors.%s.targets must contain a primary target and at least one fallback target for strategy %q", selectorID, SelectorStrategyFallback)
+	}
+	if _, _, err := config.FallbackGroup(selector); err != nil {
+		return fmt.Errorf("selectors.%s: %w", selectorID, err)
 	}
 	return nil
 }

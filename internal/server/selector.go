@@ -115,6 +115,8 @@ func CreateSelectorMiddleware(s *Server) chain.Middleware {
 				target, err = strategyPin(selector)
 			case config.SelectorStrategyWarm:
 				target, err = strategyWarm(s.cfg, selector, s.local.RunningModels())
+			case config.SelectorStrategyFallback:
+				target, err = strategyFallback(s.cfg, selector, s.local.RunningModels())
 			case config.SelectorStrategySpillover:
 				target, err = strategySpillover(model, spillovers, s.local.RunningModels())
 			default:
@@ -162,20 +164,63 @@ func strategyWarm(cfg config.Config, selector config.SelectorConfig, running map
 	if len(selector.Targets) == 0 {
 		return "", fmt.Errorf("selector has no targets")
 	}
+	return warmTarget(cfg, selector.Targets, running), nil
+}
 
-	for _, target := range selector.Targets {
+// strategyFallback prefers the primary (first) target while the watched routing
+// group is idle and switches to the first usable fallback target while another
+// member of that group is starting or ready.
+//
+// Unlike strategyWarm this decision does not depend on whether a target happens
+// to be loaded right now, so a fallback that was unloaded by a TTL does not
+// make the selector fall back to cold starting the primary target.
+func strategyFallback(cfg config.Config, selector config.SelectorConfig, running map[string]process.ProcessState) (string, error) {
+	if len(selector.Targets) == 0 {
+		return "", fmt.Errorf("selector has no targets")
+	}
+	if len(selector.Targets) == 1 {
+		return selector.Targets[0], nil
+	}
+
+	_, members, err := cfg.FallbackGroup(selector)
+	if err != nil {
+		return "", err
+	}
+
+	primary, _ := cfg.RealModelName(selector.Targets[0])
+	for _, member := range members {
+		if member == primary {
+			// The primary target itself does not make its own group busy.
+			continue
+		}
+		switch running[member] {
+		case process.StateStarting, process.StateReady:
+			return warmTarget(cfg, selector.Targets[1:], running), nil
+		}
+	}
+
+	return selector.Targets[0], nil
+}
+
+// warmTarget returns the first ready target, then the first starting target and
+// otherwise the first target so the caller cold starts it.
+func warmTarget(cfg config.Config, targets []string, running map[string]process.ProcessState) string {
+	if len(targets) == 0 {
+		return ""
+	}
+	for _, target := range targets {
 		modelID, _ := cfg.RealModelName(target)
 		if running[modelID] == process.StateReady {
-			return target, nil
+			return target
 		}
 	}
-	for _, target := range selector.Targets {
+	for _, target := range targets {
 		modelID, _ := cfg.RealModelName(target)
 		if running[modelID] == process.StateStarting {
-			return target, nil
+			return target
 		}
 	}
-	return selector.Targets[0], nil
+	return targets[0]
 }
 
 func strategySpillover(selectorID string, tracker *selectorSpilloverTracker, running map[string]process.ProcessState) (string, error) {

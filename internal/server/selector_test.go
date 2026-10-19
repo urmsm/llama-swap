@@ -120,6 +120,96 @@ func TestServer_SelectorStrategyWarm(t *testing.T) {
 	assert.Equal(t, "a", target)
 }
 
+func TestServer_SelectorStrategyFallback(t *testing.T) {
+	cfg := config.Config{
+		Models: map[string]config.ModelConfig{
+			"gpu":   {},
+			"cpu":   {},
+			"cpu-b": {},
+			"big":   {},
+		},
+		Routing: config.RoutingConfig{
+			Router: config.RouterConfig{
+				Use: "group",
+				Settings: config.RouterSettings{
+					Groups: map[string]config.GroupConfig{
+						"main": {Swap: true, Exclusive: true, Members: []string{"big", "gpu"}},
+						"aux":  {Swap: false, Exclusive: false, Persistent: true, Members: []string{"cpu", "cpu-b"}},
+					},
+				},
+			},
+		},
+	}
+	selector := config.SelectorConfig{
+		Strategy: config.SelectorStrategyFallback,
+		Targets:  []string{"gpu", "cpu"},
+	}
+
+	// The watched group is idle, so the primary target is used.
+	target, err := strategyFallback(cfg, selector, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "gpu", target)
+
+	// Another member of the group is running: use the fallback target.
+	target, err = strategyFallback(cfg, selector, map[string]process.ProcessState{
+		"big": process.StateReady,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "cpu", target)
+
+	// A starting member counts as busy too.
+	target, err = strategyFallback(cfg, selector, map[string]process.ProcessState{
+		"big": process.StateStarting,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "cpu", target)
+
+	// The primary target itself does not make its own group busy.
+	target, err = strategyFallback(cfg, selector, map[string]process.ProcessState{
+		"gpu": process.StateReady,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "gpu", target)
+
+	// Stopping members are on their way out and do not count as busy.
+	target, err = strategyFallback(cfg, selector, map[string]process.ProcessState{
+		"big": process.StateStopping,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "gpu", target)
+
+	// Fallback targets are avoided after a TTL unload: the group stays busy
+	// even when nothing is loaded, and the first fallback target is cold
+	// started instead of the primary target.
+	target, err = strategyFallback(cfg, selector, map[string]process.ProcessState{
+		"big": process.StateReady,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "cpu", target)
+
+	// With several fallbacks the first already ready one wins.
+	multi := config.SelectorConfig{
+		Strategy: config.SelectorStrategyFallback,
+		Targets:  []string{"gpu", "cpu", "cpu-b"},
+	}
+	target, err = strategyFallback(cfg, multi, map[string]process.ProcessState{
+		"big":   process.StateReady,
+		"cpu-b": process.StateReady,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "cpu-b", target)
+
+	// An unknown fallback group is an error rather than a silent fallback.
+	bad := config.SelectorConfig{
+		Strategy: config.SelectorStrategyFallback,
+		Targets:  []string{"gpu", "cpu"},
+		Settings: config.SelectorSettings{Fallback: config.FallbackSettings{Group: "missing"}},
+	}
+	_, err = strategyFallback(cfg, bad, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a routing group")
+}
+
 func TestServer_SelectorStrategySpillover(t *testing.T) {
 	cfg := config.Config{
 		Models: map[string]config.ModelConfig{

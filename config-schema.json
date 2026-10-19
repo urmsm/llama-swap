@@ -367,7 +367,8 @@
                         "enum": [
                             "warm",
                             "pin",
-                            "spillover"
+                            "spillover",
+                            "fallback"
                         ],
                         "description": "How a target is selected for each request."
                     },
@@ -388,6 +389,18 @@
                                 "minimum": 1,
                                 "default": 1,
                                 "description": "Requests reserved per active target before spilling over to the next target."
+                            },
+                            "fallback": {
+                                "type": "object",
+                                "properties": {
+                                    "group": {
+                                        "type": "string",
+                                        "default": "",
+                                        "description": "Routing group watched by the fallback strategy. While another member of the group is starting or ready, the first usable target after the primary is used. Empty uses the group that contains the primary target. Requires the group router and at least two targets."
+                                    }
+                                },
+                                "additionalProperties": false,
+                                "default": {}
                             }
                         },
                         "additionalProperties": false,
